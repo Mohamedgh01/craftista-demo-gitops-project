@@ -1,0 +1,105 @@
+name: Build and Push All Microservices to Docker Hub
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  DOCKER_HUB_USERNAME: mohamedgharbii
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - frontend
+          - catalogue
+          - recommendation
+          - voting
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Determine Bump Type from Commit Message
+        id: bump_type
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "Commit message: $COMMIT_MSG"
+
+          if echo "$COMMIT_MSG" | grep -qE "BREAKING CHANGE|!:"; then
+            echo "BUMP=major" >> $GITHUB_ENV
+          elif echo "$COMMIT_MSG" | grep -iq "^feat:"; then
+            echo "BUMP=minor" >> $GITHUB_ENV
+          elif echo "$COMMIT_MSG" | grep -iq "^fix:"; then
+            echo "BUMP=patch" >> $GITHUB_ENV
+          else
+            echo "No matching pattern, defaulting to patch."
+            echo "BUMP=patch" >> $GITHUB_ENV
+          fi
+
+      - name: Determine Next Semantic Version
+        id: get_version
+        run: |
+          REPO_NAME="${{ matrix.service }}"
+          echo "Fetching current tags for $REPO_NAME"
+
+          # Query Docker Hub tags (requires public access)
+          TAGS=$(curl -s "https://hub.docker.com/v2/repositories/${{ env.DOCKER_HUB_USERNAME }}/$REPO_NAME/tags/?page_size=100" | \
+                jq -r '.results[].name' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true)
+
+          if [[ -z "$TAGS" ]]; then
+            NEXT_VERSION="1.0.0"
+          else
+            LAST_VERSION=$(echo "$TAGS" | sort -V | tail -n 1)
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$LAST_VERSION"
+
+            case "$BUMP" in
+              major)
+                MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0;;
+              minor)
+                MINOR=$((MINOR + 1)); PATCH=0;;
+              patch)
+                PATCH=$((PATCH + 1));;
+            esac
+
+            NEXT_VERSION="$MAJOR.$MINOR.$PATCH"
+          fi
+
+          echo "NEXT_VERSION=$NEXT_VERSION" >> $GITHUB_ENV
+          echo "Next version for $REPO_NAME: $NEXT_VERSION"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Docker Image for ${{ matrix.service }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ matrix.service }}
+          push: true
+          tags: |
+            ${{ env.DOCKER_HUB_USERNAME }}/${{ matrix.service }}:${{ env.NEXT_VERSION }}
+            ${{ env.DOCKER_HUB_USERNAME }}/${{ matrix.service }}:latest
+
+      - name: Tag Git Repo with Version (if not exists)
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          TAG_NAME="v${{ matrix.service }}-${{ env.NEXT_VERSION }}"
+          if git ls-remote --tags origin | grep -q "refs/tags/$TAG_NAME$"; then
+            echo "Tag $TAG_NAME already exists. Skipping tag push."
+          else
+            git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
+            git push origin "$TAG_NAME"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
