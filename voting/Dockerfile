@@ -1,4 +1,4 @@
-# Stage 1: build
+# Stage 1: build phase
 FROM maven:3.9-eclipse-temurin-17-alpine AS build
 WORKDIR /app
 COPY . .
